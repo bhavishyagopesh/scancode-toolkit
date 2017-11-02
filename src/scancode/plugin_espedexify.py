@@ -51,29 +51,21 @@ if TRACE:
 
 
 """
-A post scan plugin to remove license boilerplate and replace this with
-SPDX license idedntifiers
+A post-scan plugin to remove license boilerplate and replace this with
+SPDX license identifiers.
 """
 
 
 @post_scan_impl
 def replace_boilerplate_with_spdx_ids(active_scans, results):
     """
-    WARNING: THIS PLUGIN DOES MODIFY THE SCANNED CODE
-    Remove license boilerplate text from scanned files and replace
-    it with a SPDX-License-Identifer.
-
-    The logic for skipping a file is this:
-     - not source code.
-     - dooes not have a 100% score and 100% coverage detected license using a single rule.
-     - does not have a detected license composed only of official SPDX license ids.
-
-    The logic to modify a file is this:
-     - determine the comment style of the detected license text lines.
-     - remove the detected license text lines from the source file.
-     - add a SPDX-License-Identifer with the correct expression using the comment style.
-
-    Has no effect unless all these scan options are requested:
+    !!!!WARNING: THIS PLUGIN DOES MODIFY THE SCANNED CODE!!!! Remove
+    license boilerplate text from scanned source code files and
+    replace it with a SPDX-License-Identifer only if this is an exact
+    100% match to a single license rule in a single block of
+    continuous text and if the match is for official SPDX license ids.
+    This option has no effect unless all these other scan options are
+    requested:
      `--license --info --diag --license-text --full-root`
     """
 
@@ -96,58 +88,82 @@ def replace_boilerplate_with_spdx_ids(active_scans, results):
         return
 
     for scanned_file in results:
-
-        if not (scanned_file['type'] == 'file' and scanned_file['is_source']):
-            yield scanned_file
-
         scanned_location = scanned_file['path']
-        assert os.path.exists(scanned_location)
+
+        if not os.path.exists(scanned_location):
+            if TRACE: logger_debug('Skipping non-existing file:', scanned_location)
+            yield scanned_file
+            continue
+
+        if scanned_file['type'] != 'file':
+            if TRACE: logger_debug('Skipping durectory or special file:', scanned_location)
+            yield scanned_file
+            continue
+
+        if not scanned_file['is_source']:
+            if TRACE: logger_debug('Skipping non-source file:', scanned_location)
+            yield scanned_file
+            continue
 
         licenses = scanned_file['licenses']
         if not licenses:
+            if TRACE: logger_debug('Skipping file without detected licenses:', scanned_location)
             yield scanned_file
+            continue
 
-        # skip if we have more than one matched block
         matched_line_blocks = set((lic['start_line'], lic['end_line'],) for lic in licenses)
         if len(matched_line_blocks) != 1:
+            if TRACE: logger_debug('Skipping file with more than one detected license text block:', scanned_location)
             yield scanned_file
+            continue
 
-        # skip if we have more than one matched rule
+        has_matched_rule = licenses[0].get('matched_rule')
+        if not has_matched_rule:
+            if TRACE: logger_debug('Skipping file without --diag "matched_rule" details:', scanned_location)
+            yield scanned_file
+            continue
+
         matched_rules = set(lic['matched_rule']['identifier'] for lic in licenses)
         if len(matched_rules) != 1:
+            if TRACE: logger_debug('Skipping file with more than one detected license rule:', scanned_location)
             yield scanned_file
+            continue
 
-        # skip if we have non SPDX official Ids
         is_official_spdx = all(lic['spdx_license_key'] for lic in licenses)
         if not is_official_spdx:
+            if TRACE: logger_debug('Skipping file non-official SPDX license ids:', scanned_location)
             yield scanned_file
+            continue
 
-        # from now on, we may have multiple records, but we have only one matched rule
+        # from now on, we may have multiple records, but we have only
+        # one matched rule
         base_match = licenses[0]
         matched_rule = base_match['matched_rule']
         start_line = base_match['start_line']
         end_line = base_match['end_line']
 
-        # skip if not 100% score and coverage
+        # TODO: this is too strict may be: skip if not 100% score and coverage
         if base_match['score'] != 100 or matched_rule['match_coverage'] != 100:
+            if TRACE: logger_debug('Skipping file with not 100% score and coverage:', scanned_location)
             yield scanned_file
+            continue
 
         removed = remove_license_text(scanned_location, start_line, end_line)
-        if TRACE: logger_debug('Removed license text from:', scanned_location, '\n', removed)
+        if TRACE: logger_debug('SUCCESS: Removed license text from:', scanned_location, '\n', removed)
         spdx_id = build_spdx_id(matched_rule)
 
         matched_text = None
-        comment_style = determine_comment_style(scanned_location, start_line, end_line, matched_text)
+        comment_style = get_comment_makers(scanned_location, start_line, end_line, matched_text)
         added = add_spdx_id(scanned_location, spdx_id, start_line, comment_style)
 
-        if TRACE: logger_debug('Added SPDX license id to:', scanned_location, '\n', added)
+        if TRACE: logger_debug('SUCCESS: Added SPDX license id to:', scanned_location, '\n', added)
 
         yield scanned_file
 
 
 def build_spdx_id(rule):
     """
-    Return a SPDX-License-Identifier string build from a rule mapping.
+    Return a SPDX-License-Identifier string build from a `rule` mapping.
     """
     keys = rule['licenses']
     choice = rule['license_choice']
@@ -159,29 +175,35 @@ def build_spdx_id(rule):
     return 'SPDX-License-Identifier: {}'.format(expression)
 
 
-def determine_comment_style(location, start_line, end_line, matched_text):
+def get_comment_makers(location, start_line, end_line, matched_text):
     """
-    Return a tuple of strings for the comment style as the start and
-    end markers. The end marker may be an empty string.
-    Return None if the match is not in a comment (such as in a literal).
+    Return a tuple of comment marker strings detected in the file at
+    `location` as the (start comment marker, end comment marker). The
+    end marker may be an empty string. Return None if the match is not
+    in a comment (such as in a literal).
     """
-    # TODO implment me
+    # TODO: implement me
     return '//', ''
 
 
 def remove_license_text(location, start_line, end_line):
     """
-    Remove matched license text from the file at `location`.
+    Remove the matched license text from `start_line` to `end_line`
+    inclusive from the text file at `location`.
     Return the removed text as a string.
-    WARNING: this modifies the file
+    NOTE: `start_line` and `end_line` are 1-based and not zero-based.
+    WARNING: this modifies the file.
     """
+    # modifications are saved in a temp file and copied back at the end
     tmp_dir = get_temp_dir(base_dir='spdx_id')
     new_file = os.path.join(tmp_dir, 'new_file')
 
+    # FIXME: consider the casse where this is not the whole that was
+    # matched and only part of the licene should be removed
     removed = ''
     with open(new_file, 'wb') as outputf:
         with open(location, 'rb') as inputf:
-            for ln, line in enumerate(inputf, 1):
+            for ln, line in enumerate(inputf, start=1):
                 if ln >= start_line and ln <= end_line:
                     removed += line
                     continue
@@ -193,21 +215,25 @@ def remove_license_text(location, start_line, end_line):
 
 def add_spdx_id(location, spdx_id, start_line, comment_style):
     """
-    Add the spdx_id to the file at `location` at `start_line` using the `comment_style` tuple.
+    Add the spdx_id SPDX-License-Identifier string to the file at
+    `location` at `start_line` using the `comment_style` tuple of
+    start and end comment markers.
     Return the added text line as a string.
-    WARNING: this modifies the file
+    NOTE: `start_line` is 1-based and not zero-based.
+    WARNING: this modifies the file.
     """
     startc, endc = comment_style
     identifier = startc + ' ' + spdx_id
     if endc:
         identifier += ' ' + endc
 
+    # modifications are saved in a temp file and copied back at the end
     tmp_dir = get_temp_dir(base_dir='spdx_id')
     new_file = os.path.join(tmp_dir, 'new_file')
 
     with open(new_file, 'wb') as outputf:
         with open(location, 'rb') as inputf:
-            for ln, line in enumerate(inputf):
+            for ln, line in enumerate(inputf, start=1):
                 if ln == start_line:
                     outputf.write(identifier)
                 outputf.write(line)
